@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Merged System: Flask Backend + React GUI (Static Files) + Custom Logic
-----------------------------------------------------------------------
+Merged System: Flask Backend + React GUI (Static Files) + Custom Logic + Signal Vectorization
+------------------------------------------------------------------------------------------
 This script incorporates custom "scratch logic" for Perlin noise and smoothing,
-replacing library functions with custom implementations.
+replacing library functions with custom implementations, and adds signal vectorization
+for Gemini-powered classification.
 
 Ensures no signal cancellation or audio transmission at system start.
 
@@ -12,6 +13,7 @@ To run the web interface and for setup instructions, see the main script documen
 This version demonstrates:
   - Custom 1D Perlin noise generation (no external library dependency)
   - Custom Moving Average Smoothing (instead of Gaussian filter)
+  - Signal Vectorization and a Flask API endpoint for processing signals
 
 These custom implementations are for demonstration and educational purposes.
 For production, using optimized libraries like scipy is generally recommended
@@ -45,6 +47,7 @@ import platform
 import json
 from datetime import datetime
 from typing import List, Tuple, Dict
+
 import queue
 
 import numpy as np
@@ -52,8 +55,6 @@ from scipy.fft import fft, ifft, fftfreq
 # scipy.ndimage.gaussian_filter1d is replaced by custom moving average
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS  # Import CORS
-# noise library is replaced by custom Perlin noise
-# from noise import pnoise1
 
 # --- Additional Imports for Gemini scan ---
 try:
@@ -557,147 +558,125 @@ def run_rf_analysis(packet_count: int = 20) -> None:
         add_log(f"Sniffing error: {e}", "error")
     add_log("RF/Packet analysis complete.")
 
-# --- Flask API Endpoints --- (No changes needed)
-@app.route('/')
-def index():
-    return send_from_directory(STATIC_DIR, 'index.html')
+# --------------------------
+# Signal Vectorization Module (Merged from separate script)
+# --------------------------
+def vectorize_signal(signal: np.ndarray) -> Dict:
+    """
+    Vectorizes a 1D signal into a dictionary of key features.
+    ... (rest of vectorize_signal function as before) ...
+    """
+    features = {}
 
-@app.route('/static/<path:path>')
-def serve_static(path):
-    return send_from_directory(STATIC_DIR, path)
+    # --- Time Domain Features ---
+    features['mean'] = np.mean(signal)
+    features['std'] = np.std(signal)
+    features['rms'] = np.sqrt(np.mean(signal**2))
+    features['min'] = np.min(signal)
+    features['max'] = np.max(signal)
+    features['energy'] = np.sum(signal**2)
 
-@app.route('/api/scan', methods=['GET'])
-def api_scan():
-    sensor_data = simulate_sensor_data()
-    devices = safety_system.scan_for_bodies(sensor_data)
-    return jsonify(devices)
+    # Zero Crossing Rate (simplified)
+    zero_crossings = np.where(np.diff(np.signbit(signal)))[0]
+    features['zero_crossing_rate'] = len(zero_crossings) / len(signal) if len(signal) > 0 else 0
 
-@app.route('/api/start', methods=['POST'])
-def api_start():
-    global monitoring, monitor_thread
-    if not monitoring:
-        monitoring = True
-        monitor_thread = threading.Thread(target=monitoring_loop, daemon=True)
-        monitor_thread.start()
-        add_log("Monitoring started")
-        return jsonify({"status": "monitoring started"})
+    # --- Frequency Domain Features ---
+    X = fft(signal)
+    mag_spectrum = np.abs(X)
+    freqs = fftfreq(len(signal), 1/SAMPLE_RATE)
+
+    features['spectral_centroid'] = np.sum(freqs * mag_spectrum) / np.sum(mag_spectrum) if np.sum(mag_spectrum) > 0 else 0
+
+    # Spectral Flatness (simplified - ratio of geometric mean to arithmetic mean of spectrum magnitude)
+    geometric_mean = np.exp(np.mean(np.log1p(mag_spectrum)))
+    arithmetic_mean = np.mean(mag_spectrum)
+    features['spectral_flatness'] = geometric_mean / arithmetic_mean if arithmetic_mean > 0 else 0
+
+    # Dominant Frequency (frequency with maximum magnitude)
+    dominant_frequency_index = np.argmax(mag_spectrum[1:len(mag_spectrum)//2]) + 1 # Exclude DC component (index 0)
+    features['dominant_frequency'] = abs(freqs[dominant_frequency_index])
+
+    # --- Signal Classification (basic - based on spectral flatness) ---
+    if features['spectral_flatness'] > 0.8:
+        features['classification'] = 'Noise-like'
+    elif features['dominant_frequency'] > 100: # Arbitrary threshold for "high" frequency dominance
+        features['classification'] = 'High-Frequency'
     else:
-        return jsonify({"status": "already monitoring"})
+        features['classification'] = 'Low-Frequency/Tonal'
 
-@app.route('/api/stop', methods=['POST'])
-def api_stop():
-    global monitoring
-    monitoring = False
-    add_log("Monitoring stopped")
-    return jsonify({"status": "monitoring stopped"})
+    return features
 
-@app.route('/api/reset', methods=['POST'])
-def api_reset():
-    global current_devices, log_messages, monitoring, my_devices, audio_transmit_enabled # Reset audio flag too
-    monitoring = False
-    current_devices = []
-    my_devices = []
-    log_messages = []
-    audio_transmit_enabled = False # Ensure audio transmission is off after reset
-    add_log("System reset completed")
-    return jsonify({"status": "reset complete"})
+def normalize_features(feature_vector: Dict) -> Dict:
+    """
+    Normalizes feature values to a 0-1 range using min-max scaling (example ranges).
+    ... (rest of normalize_features function as before) ...
+    """
+    normalized_features = {}
+    normalization_ranges = { # Example ranges - adjust as needed
+        'mean': (-1, 1),        # Assuming signal is normalized to [-1, 1]
+        'std': (0, 0.5),       # Example std range
+        'rms': (0, 1),         # RMS in amplitude range
+        'min': (-1, 0),        # Min value range
+        'max': (0, 1),         # Max value range
+        'energy': (0, 1000),    # Example energy range (adjust based on signal length/amplitude)
+        'zero_crossing_rate': (0, 1),
+        'spectral_centroid': (0, SAMPLE_RATE / 2), # Max possible centroid is Nyquist frequency
+        'spectral_flatness': (0, 1),
+        'dominant_frequency': (0, SAMPLE_RATE / 2) # Max possible dominant frequency
+    }
 
-@app.route('/api/deploy', methods=['POST'])
-def api_deploy():
-    try:
-        deployment_code = """
-print("Deploying Tranxa System...")
-# Add actual deployment logic here
-"""
-        installer.deploy(deployment_code)
-        add_log("System deployed successfully.")
-        return jsonify({"status": "deployed"})
-    except Exception as e:
-        add_log(f"Deployment error: {e}", "error")
-        return jsonify({"status": "deployment failed"})
-
-@app.route('/api/audio', methods=['GET'])
-def api_audio():
-    try:
-        if not rgb_queue.empty():
-            visual_params = rgb_queue.get_nowait()
-            return jsonify(visual_params)
+    for key, value in feature_vector.items():
+        if key in normalization_ranges:
+            min_val, max_val = normalization_ranges[key]
+            if max_val > min_val: # Avoid division by zero
+                normalized_value = (value - min_val) / (max_val - min_val)
+                normalized_features[key] = np.clip(normalized_value, 0, 1) # Clip to 0-1 range
+            else:
+                normalized_features[key] = 0.5 # Default if range is invalid (e.g., min == max)
         else:
-            return jsonify({"rgb": [1.0, 1.0, 1.0], "intensity": 0})
+            normalized_features[key] = value # Keep unnormalized if no range defined
+
+    return normalized_features
+
+def vectorize_signals(signals: List[np.ndarray]) -> List[str]:
+    """
+    Vectorizes a list of signals and returns a list of JSON strings representing
+    the vectorized and normalized features.
+    ... (rest of vectorize_signals function as before) ...
+    """
+    vectorized_strings = []
+    for signal in signals:
+        feature_vector = vectorize_signal(signal) # Vectorize
+        normalized_vector = normalize_features(feature_vector) # Normalize
+        vectorized_strings.append(json.dumps(normalized_vector)) # Convert to JSON string
+    return vectorized_strings
+
+# --- Flask API Endpoint for Signal Vectorization (Merged from separate script) ---
+@app.route('/api/vectorize', methods=['POST'])
+def api_vectorize():
+    """
+    API endpoint to vectorize signals. Expects a JSON payload with a list of signals.
+    Signals should be provided as lists of numerical values.
+    ... (rest of api_vectorize function as before) ...
+    """
+    try:
+        data = request.get_json()
+        if not data or not isinstance(data, list):
+            return jsonify({"error": "Expected a list of signals in JSON payload."}), 400
+
+        signals_np = []
+        for signal_list in data:
+            try:
+                signals_np.append(np.array(signal_list, dtype=np.float32)) # Ensure signals are numpy arrays
+            except ValueError:
+                return jsonify({"error": "Invalid signal data format. Signals must be lists of numbers."}), 400
+
+        vectorized_output = vectorize_signals(signals_np) # Vectorize the signals
+        return jsonify(vectorized_output) # Return list of vectorized strings
+
     except Exception as e:
-        add_log(f"Audio API error: {e}", "error")
-        return jsonify({"rgb": [1.0, 1.0, 1.0], "intensity": 0})
-
-@app.route('/api/logs', methods=['GET'])
-def api_logs():
-    return jsonify(log_messages)
-
-@app.route('/api/logfence', methods=['GET'])
-def api_logfence():
-    result = get_log_frequency_fence()
-    return jsonify(result)
-
-@app.route('/api/rf_analysis', methods=['POST'])
-def api_rf_analysis():
-    if scapy_available:
-        rf_thread = threading.Thread(target=run_rf_analysis, daemon=True)
-        rf_thread.start()
-        return jsonify({"status": "RF analysis started in background"})
-    else:
-        return jsonify({"status": "Scapy not installed, RF analysis disabled"})
-
-@app.route('/api/gemini_scan', methods=['POST'])
-def api_gemini_scan():
-    result = gemini_scan()
-    return jsonify(result)
-
-@app.route('/api/add_device', methods=['POST'])
-def api_add_device():
-    data = request.get_json()
-    if not data or 'device_id' not in data:
-        return jsonify({"status": "error", "message": "device_id missing"}), 400
-    device_id = data['device_id']
-    device = next((d for d in current_devices if d.get("id") == device_id), None)
-    if not device:
-        return jsonify({"status": "error", "message": "Device not found in current devices"}), 404
-    global my_devices
-    if any(d.get("id") == device_id for d in my_devices):
-        return jsonify({"status": "error", "message": "Device already in my devices list"}), 400
-    my_devices.append(device)
-    add_log(f"Device {device_id} added to my devices list.")
-    return jsonify({"status": "success", "message": "Device added to my devices list."})
-
-@app.route('/api/cancel_device', methods=['POST'])
-def api_cancel_device():
-    data = request.get_json()
-    if not data or 'device_id' not in data:
-        return jsonify({"status": "error", "message": "device_id missing"}), 400
-    device_id = data['device_id']
-    confirm = data.get('confirm', False)
-    global my_devices
-    device_to_cancel = next((d for d in my_devices if d.get("id") == device_id), None)
-    if not device_to_cancel:
-        return jsonify({"status": "error", "message": "Device not in your 'My Devices' list"}), 404
-
-    critical_keywords = ["pacemaker", "insulin pump", "neural stimulator", "life support"]
-    name_lower = device_to_cancel.get("name", "").lower()
-    if any(keyword in name_lower for keyword in critical_keywords):
-        return jsonify({"status": "error", "message": "Cannot cancel frequency for critical life support device."}), 403
-    if not confirm:
-        return jsonify({"status": "pending", "message": "Please confirm cancellation."})
-
-    my_devices = [d for d in my_devices if d['id'] != device_id]
-    add_log(f"Device {device_id} frequency cancellation initiated.")
-    return jsonify({"status": "success", "message": "Device frequency cancellation initiated."})
-
-def monitoring_loop():
-    global current_devices, monitoring
-    add_log("Monitoring loop started")
-    while monitoring:
-        sensor_data = simulate_sensor_data()
-        current_devices = safety_system.scan_for_bodies(sensor_data)
-        time.sleep(2)
-    add_log("Monitoring loop stopped")
+        add_log(f"Error during signal vectorization API call: {e}", "error")
+        return jsonify({"error": "Error processing signals."}), 500
 
 # --------------------------
 # Gemini Scan Functions (No changes needed)
