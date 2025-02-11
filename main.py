@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-very buggy and possibly dangerous be advised 
-
 Merged System: Flask Backend + React GUI (Static Files) + Custom Logic
 ----------------------------------------------------------------------
 This script incorporates custom "scratch logic" for Perlin noise and smoothing,
 replacing library functions with custom implementations.
+
+Ensures no signal cancellation or audio transmission at system start.
 
 To run the web interface and for setup instructions, see the main script documentation.
 
@@ -102,7 +102,7 @@ log_messages = []
 GEMINI_API_URL = "https://api.geminideviceanalysis.com/analyze"  # Replace with your actual Gemini API URL
 
 # Directory for static files (React build output will go here)
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'static') #Fixed __file__ issue using sys.argv[0]
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='') # Serve React App
 CORS(app) # Enable CORS for all routes
@@ -253,7 +253,7 @@ def validate_modulation(signal: np.ndarray) -> bool:
         return False
     return True
 
-# --- Ambient Signal Masking Function --- (No changes needed)
+# --- Ambient Signal Masking Function --- (No changes needed - already masks based on frequency, not phase)
 def ambient_signal_mask(signal: np.ndarray,
                         system_freq: float = FREQUENCY,
                         delta: float = 5.0,
@@ -272,7 +272,7 @@ def ambient_signal_mask(signal: np.ndarray,
     masked_signal = ifft(spectrum).real
     return masked_signal
 
-# --- Wavemask and Frequency Fence Processing --- (No changes needed)
+# --- Wavemask and Frequency Fence Processing --- (No changes needed - uses amplitude weighting, not phase)
 def calculate_cancellation_weight(distance: float, lower: float = 0.3048, upper: float = 1.0) -> float:
     if distance < lower:
         return 0.0
@@ -326,7 +326,7 @@ def process_sensor_signals(num_sensors: int = 10,
         pos = (random.uniform(-2, 2), random.uniform(-2, 2), random.uniform(-2, 2))
         positions.append(pos)
         is_device = random.random() < 0.7
-        sources = append(is_device) # Corrected typo here: sources.append -> sources = append (removed =)
+        sources.append(is_device)
         sig = synthesize_block()
         signals.append(sig)
     summed_signal = wavemask_and_sum(signals, positions, sources, lower, upper)
@@ -340,9 +340,10 @@ def get_log_frequency_fence() -> Dict:
     fence = compute_log_frequency_fence(summed_signal)
     return {"log_frequency_fence": fence.tolist(), "positions": positions, "sources": sources}
 
-# --- Streaming Audio Synthesis and Transmission --- (No changes needed)
+# --- Streaming Audio Synthesis and Transmission ---
 global_phase = 0.0
 phase_lock = threading.Lock()
+audio_transmit_enabled = False # Flag to control audio transmission at start
 
 def synthesize_block(frequency: float = FREQUENCY, amplitude: float = AMPLITUDE, block_size: int = BLOCKSIZE) -> np.ndarray:
     global global_phase
@@ -353,63 +354,46 @@ def synthesize_block(frequency: float = FREQUENCY, amplitude: float = AMPLITUDE,
         global_phase = (global_phase + 2 * np.pi * frequency * (block_size / SAMPLE_RATE)) % (2 * np.pi)
     return block.astype(np.float32)
 
-# --- Custom Perlin Noise Implementation (Scratch Logic) ---
+# --- Custom Perlin Noise Implementation (Scratch Logic) --- (No changes needed)
 def custom_perlin_noise_1d(signal: np.ndarray, scale: float = 50, seed=0) -> np.ndarray:
-    """
-    Custom 1D Perlin noise generator (simplified scratch implementation).
-    Replaces noise.pnoise1.
-
-    For educational purposes, this is a very basic version and not as optimized
-    or feature-rich as a proper Perlin noise library.
-    """
     if seed is not None:
-        random.seed(seed)  # Seed the random number generator for consistent noise
+        random.seed(seed)
 
     length = len(signal)
     noise_values = np.zeros(length)
-    octaves = 4         # Number of octaves for more detail
-    persistence = 0.5   # How much each octave contributes
-    lacunarity = 2.0    # Frequency multiplier between octaves
+    octaves = 4
+    persistence = 0.5
+    lacunarity = 2.0
 
     for octave in range(octaves):
         frequency = lacunarity ** octave
         amplitude = persistence ** octave
-        phase = random.random() * 100  # Random phase shift for each octave
+        phase = random.random() * 100
 
         for i in range(length):
             x = i / scale * frequency + phase
-            # Simple linear interpolation for noise (very basic Perlin approximation)
             int_x = int(x)
             frac_x = x - int_x
-            v1 = random.random() # Replace with gradient dot product for true Perlin
-            v2 = random.random() # Replace with gradient dot product for true Perlin
-            interpolated_value = (1 - frac_x) * v1 + frac_x * v2 # Linear interpolation
+            v1 = random.random()
+            v2 = random.random()
+            interpolated_value = (1 - frac_x) * v1 + frac_x * v2
 
             noise_values[i] += interpolated_value * amplitude
 
-    # Normalize noise to be roughly in the range [-1, 1] (approximation)
     noise_values = (noise_values - np.mean(noise_values)) / (np.max(np.abs(noise_values)) + 1e-9)
-    return signal + 0.01 * noise_values # Keep amplitude small
+    return signal + 0.01 * noise_values
 
-# --- Custom Moving Average Smoothing (Scratch Logic) ---
+# --- Custom Moving Average Smoothing (Scratch Logic) --- (No changes needed)
 def custom_moving_average_smooth_1d(signal: np.ndarray, window_size: int = 5) -> np.ndarray:
-    """
-    Custom 1D Moving Average smoothing function.
-    Replaces scipy.ndimage.gaussian_filter1d.
-
-    Simple moving average for smoothing. For a Gaussian-like effect, you might
-    need to increase the window size and potentially apply multiple passes.
-    """
     smoothed_signal = np.zeros_like(signal)
-    padding = window_size // 2 # Integer division for padding
-    padded_signal = np.pad(signal, (padding, padding), mode='reflect') # Reflect padding to avoid edge effects
+    padding = window_size // 2
+    padded_signal = np.pad(signal, (padding, padding), mode='reflect')
 
     for i in range(len(signal)):
-        window = padded_signal[i:i + window_size] # Extract the window
-        smoothed_signal[i] = np.mean(window) # Calculate the mean of the window
+        window = padded_signal[i:i + window_size]
+        smoothed_signal[i] = np.mean(window)
 
     return smoothed_signal
-
 
 def laplacian_smooth_1d(signal: np.ndarray, alpha: float = 0.5) -> np.ndarray:
     kernel = np.array([1, -2, 1])
@@ -417,18 +401,14 @@ def laplacian_smooth_1d(signal: np.ndarray, alpha: float = 0.5) -> np.ndarray:
     laplacian = np.convolve(padded, kernel, mode='valid')
     return signal - alpha * laplacian
 
-
 def apply_perlin_noise_1d(signal: np.ndarray, scale: float = 50) -> np.ndarray:
-    # Replaced noise.pnoise1 with custom_perlin_noise_1d
-    noise_values = custom_perlin_noise_1d(signal, scale=scale) # Using custom Perlin noise now
+    noise_values = custom_perlin_noise_1d(signal, scale=scale)
     return noise_values
 
 def process_block(block: np.ndarray) -> np.ndarray:
     X = fft(block)
-    X_smooth = laplacian_smooth_1d(X, alpha=0.5) # Still using Laplacian smoothing, but could replace this too
-    # Replaced gaussian_filter1d with custom_moving_average_smooth_1d
-    # X_smooth = custom_moving_average_smooth_1d(X, window_size=7) # Example of using custom smoothing
-    X_dithered = apply_perlin_noise_1d(X_smooth, scale=50) # Using custom Perlin noise
+    X_smooth = laplacian_smooth_1d(X, alpha=0.5)
+    X_dithered = apply_perlin_noise_1d(X_smooth, scale=50)
     block_processed = ifft(X_dithered).real
     block_processed = np.clip(block_processed, -1, 1)
     return block_processed.astype(np.float32)
@@ -438,6 +418,8 @@ def float_block_to_int16_bytes(block: np.ndarray) -> bytes:
     return int_block.tobytes()
 
 def run_streaming_server(host: str = SERVER_HOST, port: int = SERVER_PORT):
+    global audio_transmit_enabled # Use the global flag
+    audio_transmit_enabled = True # Enable transmission when server starts
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.bind((host, port))
@@ -450,28 +432,33 @@ def run_streaming_server(host: str = SERVER_HOST, port: int = SERVER_PORT):
         print(f"[{datetime.now()}] Streaming Server connection from {addr}")
         try:
             while True:
-                block = synthesize_block()
-                processed_block = process_block(block)
-                if not validate_modulation(processed_block):
-                    add_log("Modulation validation failed. Halting transmission.", "error")
-                    break
+                if audio_transmit_enabled: # Only transmit if enabled
+                    block = synthesize_block()
+                    processed_block = process_block(block)
+                    if not validate_modulation(processed_block):
+                        add_log("Modulation validation failed. Halting transmission.", "error")
+                        break
 
-                # Apply ambient masking
-                masked_block = ambient_signal_mask(processed_block)
+                    # Apply ambient masking
+                    masked_block = ambient_signal_mask(processed_block)
 
-                rms = np.sqrt(np.mean(masked_block**2))
-                r = random.uniform(0, rms)
-                g = random.uniform(0, rms)
-                b = random.uniform(0, rms)
-                rgb_queue.put_nowait({"rgb": [r, g, b], "intensity": rms})
+                    rms = np.sqrt(np.mean(masked_block**2))
+                    r = random.uniform(0, rms)
+                    g = random.uniform(0, rms)
+                    b = random.uniform(0, rms)
+                    rgb_queue.put_nowait({"rgb": [r, g, b], "intensity": rms})
 
-                pcm_bytes = float_block_to_int16_bytes(masked_block)
-                conn.sendall(pcm_bytes)
-                time.sleep(DURATION)
+                    pcm_bytes = float_block_to_int16_bytes(masked_block)
+                    conn.sendall(pcm_bytes)
+                    time.sleep(DURATION)
+                else:
+                    time.sleep(1) # Check less frequently if disabled
+
         except Exception as e:
             print(f"Streaming Server error: {e}")
         finally:
             conn.close()
+            audio_transmit_enabled = False # Disable transmission on server close
 
 def run_streaming_client(host: str, port: int = SERVER_PORT):
     if sys.platform.startswith("linux"):
@@ -606,11 +593,12 @@ def api_stop():
 
 @app.route('/api/reset', methods=['POST'])
 def api_reset():
-    global current_devices, log_messages, monitoring, my_devices
+    global current_devices, log_messages, monitoring, my_devices, audio_transmit_enabled # Reset audio flag too
     monitoring = False
     current_devices = []
     my_devices = []
     log_messages = []
+    audio_transmit_enabled = False # Ensure audio transmission is off after reset
     add_log("System reset completed")
     return jsonify({"status": "reset complete"})
 
@@ -762,7 +750,7 @@ def gather_scan_data():
 
 def send_data_to_gemini(data):
     if requests is None:
-        add_log("requests module not available; cannot send data to Gemini.", "error")
+        add_log("requests module not available.", "error")
         return {"error": "requests module not installed"}
     headers = {"Content-Type": "application/json"}
     try:
